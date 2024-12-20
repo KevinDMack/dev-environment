@@ -1,10 +1,10 @@
 
 
 @description('Environment Prefix')
-param envPrefix string = 'spacesdk'
+param envPrefix string = 'dev'
 
 @description('Infra Location')
-param infraLoc string = 'westus2'
+param infraLoc string = 'usgovvirginia'
 
 @description('Infra VNet Name')
 param infraVNetNameParam string = 'vnet-teaminfra'
@@ -21,7 +21,7 @@ param vpnClientAddressPool string = '10.1.0.0/24'
 /* Improvement - move this to an array of test environments  */
 
 @description('Test1 Location')
-param test1Loc string = 'westus2'
+param test1Loc string = 'usgovvirginia'
 
 @description('Test1 VNet Name')
 param test1VNetNameParam string = 'vnet-test1'
@@ -30,20 +30,38 @@ var test1VNetName = '${envPrefix}-${test1VNetNameParam}'
 
 /* Improvement - move this to an array of dev environments  */
 @description('Dev1 Location')
-param dev1Loc string = 'westus2'
+param dev1Loc string = 'usgovvirginia'
 
 @description('Dev1 VNet Name')
 param dev1VNetNameParam string = 'vnet-dev1'
 var dev1VNetName = '${envPrefix}-${dev1VNetNameParam}'
 
 @description('Dev2 Location')
-param dev2Loc string = 'eastus'
+param dev2Loc string = 'usgovarizona'
 
 @description('Dev2 VNet Name')
 param dev2VNetNameParam string = 'vnet-dev2'
 var dev2VNetName = '${envPrefix}-${dev2VNetNameParam}'
 
+@description('The shared resourcce vnet')
+param sharedVnetNameParam string = 'vnet-shared'
+var sharedVnetName = '${envPrefix}-${sharedVnetNameParam}'
 
+@description('The location of the shared resource vnet')
+param sharedVnetLoc string = 'usgovvirginia'
+
+// parameters for environment type
+param deploy_azure_ml bool = false
+param deploy_open_ai bool = false
+param deploy_data_science_vm bool = false
+
+// Configuration Options for Environment Type:
+param numbers_of_data_science_vm int = 1
+param admin_user_name string
+@secure()
+param admin_user_password string
+param impact_level string = 'IL4'
+param data_science_vm_type string = 'Linux'
 
 var audienceMap = {
   AzureCloud: '41b23e61-6c1e-4545-b367-cd054e0ed4b4'
@@ -185,8 +203,6 @@ resource dev2VNet 'Microsoft.Network/virtualNetworks@2020-05-01' = {
   }
 }
 
-
-
 resource test1VNet 'Microsoft.Network/virtualNetworks@2020-05-01' = {
   name: test1VNetName
   location: test1Loc
@@ -207,7 +223,43 @@ resource test1VNet 'Microsoft.Network/virtualNetworks@2020-05-01' = {
   }
 }
 
-
+resource sharedVnet 'Microsoft.Network/virtualNetworks@2020-05-01' = {
+  name: sharedVnetName
+  location: sharedVnetLoc
+  properties: {
+    addressSpace: {
+      addressPrefixes: [
+        '10.5.0.0/16'
+      ]
+    }
+    subnets: [
+      {
+        name: 'Main'
+        properties: {
+          addressPrefix: '10.5.0.0/24'
+        }
+      }
+      {
+        name: 'storage'
+        properties: {
+          addressPrefix: '10.5.1.0/24'
+        }
+      }
+      {
+        name: 'registry'
+        properties: {
+          addressPrefix: '10.5.2.0/24'
+        }
+      }
+      {
+        name: 'key-vault'
+        properties: {
+          addressPrefix: '10.5.3.0/24'
+        }
+      }
+    ]
+  }
+}
 
 resource VNetPeeringHubToDev1 'Microsoft.Network/virtualNetworks/virtualNetworkPeerings@2020-05-01' = {
   parent: infraVNet
@@ -303,5 +355,133 @@ resource VNetPeeringTest1ToHub 'Microsoft.Network/virtualNetworks/virtualNetwork
   }
   dependsOn: [
     virtualNetworkGateway
+  ]
+}
+
+resource VNetPeeringHubToShared 'Microsoft.Network/virtualNetworks/virtualNetworkPeerings@2020-05-01' = {
+  parent: infraVNet
+  name: '${infraVNetName}-${sharedVnetName}'
+  properties: {
+    allowVirtualNetworkAccess: true
+    allowForwardedTraffic: false
+    allowGatewayTransit: true
+    useRemoteGateways: false
+    remoteVirtualNetwork: {
+      id: sharedVnet.id
+    }
+  }
+}
+
+
+resource VNetPeeringSharedToHub 'Microsoft.Network/virtualNetworks/virtualNetworkPeerings@2020-05-01' = {
+  parent: sharedVnet
+  name: '${sharedVnetName}-${infraVNetName}'
+  properties: {
+    allowVirtualNetworkAccess: true
+    allowForwardedTraffic: false
+    allowGatewayTransit: false
+    useRemoteGateways: true
+    remoteVirtualNetwork: {
+      id: infraVNet.id
+    }
+  }
+  dependsOn: [
+    virtualNetworkGateway
+  ]
+}
+
+resource storageAccount 'Microsoft.Storage/storageAccounts@2021-04-01' = {
+  name: '${envPrefix}stg'
+  location: sharedVnetLoc
+  sku: {
+    name: 'Standard_LRS'
+  }
+  kind: 'StorageV2'
+  properties: {
+    accessTier: 'Hot'
+    networkAcls: {
+      bypass: 'None'
+      virtualNetworkRules: [
+        {
+          id: '${sharedVnet.id}/subnets/storage'
+        }
+      ]
+      ipRules: []
+      defaultAction: 'Deny'
+    }
+  }
+}
+
+module registry './modules/registry.bicep' = {
+  name: 'registry'
+  params: {
+    acr_name: '${envPrefix}acr'
+    location: sharedVnetLoc
+    subnetId: sharedVnet.properties.subnets[2].id
+    vnet_id: sharedVnet.id 
+    default_tag_name: 'environment'
+    default_tag_value: envPrefix
+  }
+}
+
+module storage './modules/storage.bicep' = {
+  name: 'storage'
+  params: {
+    storage_account_name: '${envPrefix}stg'
+    location: sharedVnetLoc
+    subnet_id: sharedVnet.properties.subnets[1].id
+    vnet_id: sharedVnet.id 
+    default_tag_name: 'environment'
+    default_tag_value: envPrefix
+  }
+}
+
+module key_vault './modules/key-vault.bicep' = {
+  name: 'key-vault'
+  params: {
+    key_vault_name: '${envPrefix}-kv'
+    location: sharedVnetLoc
+    subnet_id: sharedVnet.properties.subnets[3].id
+    vnet_id: sharedVnet.id 
+    default_tag_name: 'environment'
+    default_tag_value: envPrefix
+  }
+}
+
+module data_science_vms './modules/virtual-machine.bicep' = [for i in range(0, numbers_of_data_science_vm): if (deploy_data_science_vm) {
+  name: 'dsvm-${i}'
+  params: {
+    vm_name: '${envPrefix}-dsvm-${i}'
+    location: dev1Loc
+    subnet_id: dev1VNet.properties.subnets[0].id
+    vm_image_publisher: 'microsoft-dsvm'
+    vm_image_offer: data_science_vm_type == 'Linux' ? 'ubuntu-2204' : 'dsvm-win-2022'
+    vm_image_sku: data_science_vm_type == 'Linux' ? '2204-gen2' : 'winserver-2022'
+    vm_compute_size: impact_level == 'IL4' ? 'Standard_DS3_v2' : 'F72s_v2'
+    vm_image_version: 'latest'
+    admin_user_name: admin_user_name
+    admin_user_password: admin_user_password
+    default_tag_name: 'environment'
+    default_tag_value: envPrefix
+  }
+}]
+
+module azure_ml './modules/azure-ml.bicep' = if (deploy_azure_ml) {
+  name: 'azure-ml'
+  params: {
+    azure_ml_workspace_name: '${envPrefix}-aml'
+    location: dev1Loc
+    subnet_id: dev1VNet.properties.subnets[0].id
+    vnet_id: dev1VNet.id
+    default_tag_name: 'environment'
+    default_tag_value: envPrefix
+    key_vault_id: key_vault.outputs.id
+    container_registry_id: registry.outputs.id
+    storage_account_id: storage.outputs.id
+  }
+  dependsOn: [
+    key_vault
+    registry
+    storage
   ]
 }
