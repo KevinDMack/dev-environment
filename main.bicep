@@ -1,10 +1,10 @@
 
 
 @description('Environment Prefix')
-param envPrefix string = 'spacesdk'
+param envPrefix string = 'dev'
 
 @description('Infra Location')
-param infraLoc string = 'westus2'
+param infraLoc string = 'usgovvirginia'
 
 @description('Infra VNet Name')
 param infraVNetNameParam string = 'vnet-teaminfra'
@@ -21,7 +21,7 @@ param vpnClientAddressPool string = '10.1.0.0/24'
 /* Improvement - move this to an array of test environments  */
 
 @description('Test1 Location')
-param test1Loc string = 'westus2'
+param test1Loc string = 'usgovvirginia'
 
 @description('Test1 VNet Name')
 param test1VNetNameParam string = 'vnet-test1'
@@ -30,20 +30,25 @@ var test1VNetName = '${envPrefix}-${test1VNetNameParam}'
 
 /* Improvement - move this to an array of dev environments  */
 @description('Dev1 Location')
-param dev1Loc string = 'westus2'
+param dev1Loc string = 'usgovvirginia'
 
 @description('Dev1 VNet Name')
 param dev1VNetNameParam string = 'vnet-dev1'
 var dev1VNetName = '${envPrefix}-${dev1VNetNameParam}'
 
 @description('Dev2 Location')
-param dev2Loc string = 'eastus'
+param dev2Loc string = 'usgovarizona'
 
 @description('Dev2 VNet Name')
 param dev2VNetNameParam string = 'vnet-dev2'
 var dev2VNetName = '${envPrefix}-${dev2VNetNameParam}'
 
+@description('The shared resourcce vnet')
+param sharedVnetNameParam string = 'vnet-shared'
+var sharedVnetName = '${envPrefix}-${sharedVnetNameParam}'
 
+@description('The location of the shared resource vnet')
+param sharedVnetLoc string = 'usgovvirginia'
 
 var audienceMap = {
   AzureCloud: '41b23e61-6c1e-4545-b367-cd054e0ed4b4'
@@ -185,8 +190,6 @@ resource dev2VNet 'Microsoft.Network/virtualNetworks@2020-05-01' = {
   }
 }
 
-
-
 resource test1VNet 'Microsoft.Network/virtualNetworks@2020-05-01' = {
   name: test1VNetName
   location: test1Loc
@@ -207,7 +210,43 @@ resource test1VNet 'Microsoft.Network/virtualNetworks@2020-05-01' = {
   }
 }
 
-
+resource sharedVnet 'Microsoft.Network/virtualNetworks@2020-05-01' = {
+  name: sharedVnetName
+  location: sharedVnetLoc
+  properties: {
+    addressSpace: {
+      addressPrefixes: [
+        '10.5.0.0/16'
+      ]
+    }
+    subnets: [
+      {
+        name: 'Main'
+        properties: {
+          addressPrefix: '10.5.0.0/24'
+        }
+      }
+      {
+        name: 'storage'
+        properties: {
+          addressPrefix: '10.5.1.0/24'
+        }
+      }
+      {
+        name: 'registry'
+        properties: {
+          addressPrefix: '10.5.2.0/24'
+        }
+      }
+      {
+        name: 'key-vault'
+        properties: {
+          addressPrefix: '10.5.3.0/24'
+        }
+      }
+    ]
+  }
+}
 
 resource VNetPeeringHubToDev1 'Microsoft.Network/virtualNetworks/virtualNetworkPeerings@2020-05-01' = {
   parent: infraVNet
@@ -304,4 +343,94 @@ resource VNetPeeringTest1ToHub 'Microsoft.Network/virtualNetworks/virtualNetwork
   dependsOn: [
     virtualNetworkGateway
   ]
+}
+
+resource VNetPeeringHubToShared 'Microsoft.Network/virtualNetworks/virtualNetworkPeerings@2020-05-01' = {
+  parent: infraVNet
+  name: '${infraVNetName}-${sharedVnetName}'
+  properties: {
+    allowVirtualNetworkAccess: true
+    allowForwardedTraffic: false
+    allowGatewayTransit: true
+    useRemoteGateways: false
+    remoteVirtualNetwork: {
+      id: sharedVnet.id
+    }
+  }
+}
+
+
+resource VNetPeeringSharedToHub 'Microsoft.Network/virtualNetworks/virtualNetworkPeerings@2020-05-01' = {
+  parent: sharedVnet
+  name: '${sharedVnetName}-${infraVNetName}'
+  properties: {
+    allowVirtualNetworkAccess: true
+    allowForwardedTraffic: false
+    allowGatewayTransit: false
+    useRemoteGateways: true
+    remoteVirtualNetwork: {
+      id: infraVNet.id
+    }
+  }
+  dependsOn: [
+    virtualNetworkGateway
+  ]
+}
+
+resource storageAccount 'Microsoft.Storage/storageAccounts@2021-04-01' = {
+  name: '${envPrefix}stg'
+  location: sharedVnetLoc
+  sku: {
+    name: 'Standard_LRS'
+  }
+  kind: 'StorageV2'
+  properties: {
+    accessTier: 'Hot'
+    networkAcls: {
+      bypass: 'None'
+      virtualNetworkRules: [
+        {
+          id: '${sharedVnet.id}/subnets/storage'
+        }
+      ]
+      ipRules: []
+      defaultAction: 'Deny'
+    }
+  }
+}
+
+module registry './modules/registry.bicep' = {
+  name: 'registry'
+  params: {
+    acr_name: '${envPrefix}acr'
+    location: sharedVnetLoc
+    subnetId: sharedVnet.properties.subnets[2].id
+    vnet_id: sharedVnet.id 
+    default_tag_name: 'environment'
+    default_tag_value: envPrefix
+  }
+}
+
+module storage './modules/storage.bicep' = {
+  name: 'storage'
+  params: {
+    storage_account_name: '${envPrefix}stg'
+    location: sharedVnetLoc
+    subnet_id: sharedVnet.properties.subnets[1].id
+    vnet_id: sharedVnet.id 
+    default_tag_name: 'environment'
+    default_tag_value: envPrefix
+  }
+}
+
+module key_vault './modules/key-vault.bicep' = {
+  name: 'key-vault'
+  params: {
+    key_vault_name: '${envPrefix}-kv'
+    location: sharedVnetLoc
+    subnet_id: sharedVnet.properties.subnets[3].id
+    vnet_id: sharedVnet.id 
+    default_tag_name: 'environment'
+    default_tag_value: envPrefix
+  }
 }
