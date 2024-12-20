@@ -50,6 +50,19 @@ var sharedVnetName = '${envPrefix}-${sharedVnetNameParam}'
 @description('The location of the shared resource vnet')
 param sharedVnetLoc string = 'usgovvirginia'
 
+// parameters for environment type
+param deploy_azure_ml bool = false
+param deploy_open_ai bool = false
+param deploy_data_science_vm bool = false
+
+// Configuration Options for Environment Type:
+param numbers_of_data_science_vm int = 1
+param admin_user_name string
+@secure()
+param admin_user_password string
+param impact_level string = 'IL4'
+param data_science_vm_type string = 'Linux'
+
 var audienceMap = {
   AzureCloud: '41b23e61-6c1e-4545-b367-cd054e0ed4b4'
   AzureUSGovernment: '51bb15d4-3a4f-4ebf-9dca-40096fe32426'
@@ -433,4 +446,42 @@ module key_vault './modules/key-vault.bicep' = {
     default_tag_name: 'environment'
     default_tag_value: envPrefix
   }
+}
+
+module data_science_vms './modules/virtual-machine.bicep' = [for i in range(0, numbers_of_data_science_vm): if (deploy_data_science_vm) {
+  name: 'dsvm-${i}'
+  params: {
+    vm_name: '${envPrefix}-dsvm-${i}'
+    location: dev1Loc
+    subnet_id: dev1VNet.properties.subnets[0].id
+    vm_image_publisher: 'microsoft-dsvm'
+    vm_image_offer: data_science_vm_type == 'Linux' ? 'ubuntu-2204' : 'dsvm-win-2022'
+    vm_image_sku: data_science_vm_type == 'Linux' ? '2204-gen2' : 'winserver-2022'
+    vm_compute_size: impact_level == 'IL4' ? 'Standard_DS3_v2' : 'F72s_v2'
+    vm_image_version: 'latest'
+    admin_user_name: admin_user_name
+    admin_user_password: admin_user_password
+    default_tag_name: 'environment'
+    default_tag_value: envPrefix
+  }
+}]
+
+module azure_ml './modules/azure-ml.bicep' = if (deploy_azure_ml) {
+  name: 'azure-ml'
+  params: {
+    azure_ml_workspace_name: '${envPrefix}-aml'
+    location: dev1Loc
+    subnet_id: dev1VNet.properties.subnets[0].id
+    vnet_id: dev1VNet.id
+    default_tag_name: 'environment'
+    default_tag_value: envPrefix
+    key_vault_id: key_vault.outputs.id
+    container_registry_id: registry.outputs.id
+    storage_account_id: storage.outputs.id
+  }
+  dependsOn: [
+    key_vault
+    registry
+    storage
+  ]
 }
